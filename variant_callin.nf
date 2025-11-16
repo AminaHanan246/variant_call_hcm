@@ -83,6 +83,7 @@ process MULTIQC {
 
 // Quality triming
 process FASTP {
+    tag "$sample_id"
     conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
     publishDir params.outdir, mode: 'copy'
 
@@ -217,6 +218,7 @@ process BWA_IDX {
 
 // BWA-MEM align
 process BWA_ALIGN {
+    tag "$sample_id"
     conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
     publishDir "${params.outdir}", mode: 'copy'
 
@@ -227,6 +229,7 @@ process BWA_ALIGN {
     output:
         tuple val(sample_id), path("${sample_id}_sorted.bam"), path("${sample_id}_sorted.bam.bai"), emit: aligned_bam
         path "${sample_id}_flagstat.txt", emit: flagstat
+        path "${sample_id}_bwa.log", optional: true
 
     script:
     """
@@ -235,10 +238,16 @@ process BWA_ALIGN {
     bwa mem -t 8 \\
         -R "@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA" \\
         ${ref_genome} ${read1} ${read2} | \\
+
     samtools sort -@ 8 -o ${sample_id}_sorted.bam -
     
     samtools index ${sample_id}_sorted.bam
     samtools flagstat ${sample_id}_sorted.bam > ${sample_id}_flagstat.txt
+
+    if [ ! -s ${sample_id}_sorted.bam ]; then
+    echo "ERROR: BAM file not created"
+    exit 1
+    fi
 
     echo "Alignment complete for ${sample_id}"
 
@@ -246,6 +255,95 @@ process BWA_ALIGN {
 
     """
 }
+
+process MARK_DUPLICATE {
+    tag "$sample_id"
+    conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
+    publishDir "${params.outdir}", mode: 'copy'
+
+    input:
+        tuple val(sample_id), path(bam), path(bai)
+
+    output:
+        tuple val(sample_id), path("${sample_id}_marked_duplicates.bam"), path("${sample_id}_marked_duplicates.bam.bai") emit: marked_reads
+        path "${sample_id}_duplicate_metrics.txt", emit: metrics  
+
+    script:  
+    """
+    gatk --java-options "-Xmx8G -XX:ParallelGCThreads=2" MarkDuplicates 
+
+        --INPUT ${bam} \\ 
+
+        --OUTPUT ${sample_id}_marked_duplicates.bam \\
+
+        --METRICS_FILE ${sample_id}_duplicate_metrics.txt \\
+
+        --CREATE_INDEX true \\
+
+        --VALIDATION_STRINGENCY SILENT \\
+
+        --OPTICAL_DUPLICATE_PIXEL_DISTANCE 2500 \\
+
+        --ASSUME_SORT_ORDER coordinate
+
+    echo "=== Duplicate Metrics ==="
+
+    head -8 ${sample_id}_duplicate_metrics.txt | tail -2
+    """
+}
+
+process BQSR_TABLE {
+    tag "$sample_id"
+    conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
+    publishDir "${params.outdir}/results", mode: 'copy'
+
+    input:
+        tuple val(sample_id), path(bam), path(bai)
+        path ref_genome
+        path ref_fai
+        path ref_dict
+        path dbsnp
+        path known_indels
+        path known_indels2
+
+    output:
+        tuple val(sample_id), path "${sample_id}_recal_data.table", emit: bqsr_table  
+
+    script:  
+    """
+    gatk --java-options "-Xmx8G" BaseRecalibrator \
+        --input ${bam} \
+        --reference ${ref_genome} \
+        --known-sites ../resources/hg38_v0_Homo_sapiens_assembly38.dbsnp138.vcf \
+        --known-sites ../resources/hg38_v0_Mills_and_1000G_gold_standard.indels.hg38.vcf.gz \
+        --known-sites ../resources/hg38_v0_Homo_sapiens_assembly38.known_indels.vcf.gz \
+        --output ${sample_id}_recal_data.table \
+    """
+}
+
+process BQSR_APPLY {
+    tag "$sample_id"
+    conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
+    publishDir "${params.outdir}", mode: 'copy'
+
+    input:
+        tuple val(sample_id), path(bam), path(bai)
+        path ref_genome
+        path recal_table
+
+    output:
+        tuple val(sample_id), path("${sample_id}_analysis_ready.bam"), path("${sample_id}_analysis_ready.bam.bai") emit: analysis_reads
+
+    script:  
+    """
+    gatk --java-options "-Xmx8G" ApplyBQSR \
+        --input ${bam} \
+        --reference ${ref_genome} \
+        --bqsr-recal-file results/${recal_table} \
+        --output ${sample_id}_analysis_ready.bam \
+    """
+}
+
 
 
 workflow {
@@ -304,15 +402,35 @@ workflow {
     BWA_IDX(ref_ch)
 
     // BWA Align
-    BWA_ALIGN(FASTP.out.trimmed_reads,BWA_IDX.out.bwa_index)
+    BWA_ALIGN(FASTP.out.trimmed_reads, BWA_IDX.out.bwa_index)
 
-    // Group all QC files
-    qc_files = FASTQC.out.fastqc_results
-        .mix(FASTP.out.html_report)
-        .mix(FASTQC_TRIMMED.out.fastqc_results)
-        .mix(BWA_ALIGN.out.flagstat)
-        .collect()
+    // // Group all QC files
+    // qc_files = FASTQC.out.fastqc_results
+    //     .mix(FASTP.out.html_report)
+    //     .mix(FASTQC_TRIMMED.out.fastqc_results)
+    //     .mix(BWA_ALIGN.out.flagstat)
+    //     .collect()
     
-    MULTIQC(qc_files)
+    // MULTIQC(qc_files)
+
+    // Mark duplicates
+    MARK_DUPLICATE(BWA_ALIGN.out.aligned_bam)
+
+    // Base Quality Score Recalibration (BQSR)
+    //https://console.cloud.google.com/storage/browser/genomics-public-data/resources/broad/hg38/v0;tab=objects?pli=1&rapt=AEjHL4NvoSfHLpK8q5OrdRiYb70RDUzdk0fdQIW-GQu1BAauECU7Jvsh-bWfqbFDn5Z_F1JgJzIfGMpdbZAaOSt-upakHpyT8IlAsHanoFJflT78ToQqJ94&prefix=&forceOnObjectsSortingFiltering=false
+    BQSR_TABLE(
+        MARK_DUPLICATE.out.marked_reads,
+        ref_ch,
+        IDX_GENERATE.out.ref_idx,
+        DICT_GENERATE.out.ref_dict,
+        dbsnp_ch,
+        indels_ch,
+        indels2_ch
+        )
+
+    BQSR_APPLY(
+        MARK_DUPLICATE.out.marked_reads,
+        ref_ch,
+        BQSR_TABLE.out.bqsr_table)
     
 }
