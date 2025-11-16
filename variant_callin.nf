@@ -53,6 +53,7 @@ process FASTQC {
 
     output:
         path "*_fastqc.{zip,html}", emit: fastqc_results
+        tuple val(sample_id), path(read1), path(read2), emit: reads
 
     script:
     """
@@ -89,14 +90,15 @@ process FASTP {
         tuple val(sample_id), path(read1), path(read2)
 
     output:
-        tuple val(sample_id), path("${sample_id}_1_trimmed.fastq"), path("${sample_id}_2_trimmed.fastq"), emit: trimmed_reads
+        tuple val(sample_id), path("${sample_id}_1_trimmed.fastq.gz"), path("${sample_id}_2_trimmed.fastq.gz"), emit: trimmed_reads
+        path "${sample_id}_trimmed_report.html", emit: html_report
     
     script:
     """
     echo "Trimming started for ${sample_id}"
 
-    fastp -i ${read1} -o ${sample_id}_1_trimmed.fastq \
-          -I ${read2} -O ${sample_id}_2_trimmed.fastq \
+    fastp -i ${read1} -o ${sample_id}_1_trimmed.fastq.gz \
+          -I ${read2} -O ${sample_id}_2_trimmed.fastq.gz \
           -h ${sample_id}_trimmed_report.html \
           -w 8
     
@@ -115,6 +117,7 @@ process FASTQC_TRIMMED {
 
     output:
         path "*_fastqc.{zip,html}", emit: fastqc_results
+        tuple val(sample_id), path(read1), path(read2), emit: trimmed_reads
 
     script:
     """
@@ -123,6 +126,24 @@ process FASTQC_TRIMMED {
     echo "FastQC complete for ${sample_id}"
     """
 }
+
+process MULTIQC_TRIMMED {
+    conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
+    publishDir "${params.outdir}/results/multiqc", mode: 'copy'
+
+    input:
+        path fastqc_files
+
+    output:
+        path "multiqc_report_trimmed.html", emit: report
+        path "multiqc_data_trimmed", emit: data
+
+    script:
+    """
+    multiqc .
+    """
+}
+
 
 // Index generation
 process IDX_GENERATE {
@@ -133,7 +154,7 @@ process IDX_GENERATE {
         path ref_genome
 
     output:
-        path "${ref_genome.baseName}.fai", emit: ref_idx
+        path "${ref_genome}.fai", emit: ref_idx
         
     script:
     """
@@ -162,8 +183,8 @@ process DICT_GENERATE {
     echo "Creating ${ref_genome.baseName} dictionary"
 
     gatk CreateSequenceDictionary \
-        -R Homo_sapiens_assembly38.fasta \
-        -O Homo_sapiens_assembly38.dict
+        -R ${ref_genome} \
+        -O ${ref_genome.baseName}.dict
 
     echo "Created ${ref_genome.baseName} dictionary"
     """
@@ -179,19 +200,50 @@ process BWA_IDX {
         path ref_genome
 
     output:
-        path "${ref_genome}.ann", emit: ref_ann
-        path "${ref_genome}.bwt", emit: ref_bwt
-        path "${ref_genome}.pac", emit: ref_pac
-        path "${ref_genome}.sa", emit: ref_sa
-        path "${ref_genome}.amb", emit: ref_amb
+        tuple path(ref_genome), path("${ref_genome}.*"), emit: bwa_index
 
     script:
     """
-    echo "Running BWA index on ${ref_genome}"
+    echo "Running BWA index on ${ref_genome.baseName}"
 
     bwa index ${ref_genome}
 
-    echo "BWA index complete for ${ref_genome}"
+    echo "BWA index complete for ${ref_genome.baseName}"
+
+    ls -lh ${ref_genome}.*
+
+    """
+}
+
+// BWA-MEM align
+process BWA_ALIGN {
+    conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
+    publishDir "${params.outdir}", mode: 'copy'
+
+    input:
+        tuple val(sample_id), path(read1), path(read2)
+        tuple path(ref_genome), path(genome_idx)
+        
+    output:
+        tuple val(sample_id), path("${sample_id}_sorted.bam"), path("${sample_id}_sorted.bam.bai"), emit: aligned_bam
+        path "${sample_id}_flagstat.txt", emit: flagstat
+
+    script:
+    """
+    echo "Aligning ${sample_id} to reference genome"
+
+    bwa mem -t 8 \\
+        -R "@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA" \\
+        ${ref_genome} ${read1} ${read2} | \\
+    samtools sort -@ 8 -o ${sample_id}_sorted.bam -
+    
+    samtools index ${sample_id}_sorted.bam
+    samtools flagstat ${sample_id}_sorted.bam > ${sample_id}_flagstat.txt
+
+    echo "Alignment complete for ${sample_id}"
+
+    ls -lh ${sample_id}_sorted.bam*
+
     """
 }
 
@@ -224,21 +276,23 @@ workflow {
         // Download SRA files
         DWNLD_SRA(srr_ch)
         reads_ch = DWNLD_SRA.out.reads
+    }
+
+    else {
+        error "Please provide either --reads (for existing FASTQ files) or --srr (to download from SRA)"
+    }
         
     // Run FASTQC on existing files
-        FASTQC(reads_ch)
+    FASTQC(reads_ch)
         
-    // Run MultiQC to aggregate results
-    MULTIQC(FASTQC.out.fastqc_results.collect())
-
     // Trimming reads
-    FASTP(reads_ch)
+    FASTP(FASTQC.out.reads)
 
     // Run FASTQC on trimmed reads
     FASTQC_TRIMMED(FASTP.out.trimmed_reads)
 
-    // Run MultiQC to aggregate trimmed results
-    MULTIQC(FASTQC_TRIMMED.out.fastqc_results.collect())
+    // // Run MultiQC to aggregate trimmed results
+    // MULTIQC_TRIMMED(FASTQC_TRIMMED.out.fastqc_results.collect())
 
     // Run samtools FASTA indexing
     IDX_GENERATE(ref_ch)
@@ -249,10 +303,16 @@ workflow {
     // BWA index 
     BWA_IDX(ref_ch)
 
+    // BWA Align
+    BWA_ALIGN(FASTP.out.trimmed_reads,BWA_IDX.out.bwa_index)
+
+    // Group all QC files
+    qc_files = FASTQC.out.fastqc_results
+        .mix(FASTP.out.html_report)
+        .mix(FASTQC_TRIMMED.out.fastqc_results)
+        .mix(BWA_ALIGN.out.flagstat)
+        .collect()
     
-    }
+    MULTIQC(qc_files)
     
-    else {
-        error "Please provide either --reads (for existing FASTQ files) or --srr (to download from SRA)"
-    }
 }
