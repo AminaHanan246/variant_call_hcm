@@ -1,23 +1,16 @@
 # DATASET
 
 Accession: NCBI BioProject PRJNA675090
-
 Organism: Homo sapiens
-
 Study Type: Whole Exome Sequencing (WES)
 
 Samples:
-
-\- 18 Hypertrophic Cardiomyopathy (HCM) patients
-
+\- Hypertrophic Cardiomyopathy (HCM) patients
 \- Tissue: anterior septal region of frozen hearts
 
 Design:
-
-\- WES performed on cardiac tissue from 18 HCM patients
-
+\- WES performed on cardiac tissue from HCM patients
 \- Aimed at identifying genetic variants contributing to HCM heterogeneity
-
 \- Data suitable for variant calling, annotation, and downstream interpretation
 
 Publication:
