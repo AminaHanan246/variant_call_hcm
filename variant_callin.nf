@@ -17,7 +17,7 @@ params.interval_list = "/mnt/d/BI_prj/wgs_proj/hcm/*.interval_list"
    Processes
 */
 
-// Download SRA file (optional - commented out by default)
+// Download SRA file 
 process DWNLD_SRA {
     tag "$srr_id"
     conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
@@ -209,7 +209,7 @@ process BWA_IDX {
     """
     echo "Running BWA index on ${ref_genome.baseName}"
 
-    bwa index ${ref_genome}
+    bwa-mem2 index ${ref_genome}
 
     echo "BWA index complete for ${ref_genome.baseName}"
 
@@ -241,7 +241,7 @@ process BWA_ALIGN {
     """
     echo "Aligning ${sample_id} to reference genome"
 
-    bwa mem -t 8 \
+    bwa mem2 -t 8 \
         ${ref_genome} ${read1} ${read2} | samtools sort -@ 8 -o ${sample_id}_sorted.bam -
     
     samtools index ${sample_id}_sorted.bam
@@ -376,7 +376,7 @@ process HAPLOTYPECALLER {
     """
 }
 
-process JOINT_GENOTYPING {
+process COMBINE_GVCF {
     conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
     publishDir "${params.outdir}", mode: 'copy'
 
@@ -385,17 +385,57 @@ process JOINT_GENOTYPING {
         path ref_genome
 
     output:
+        tuple path("HCM_combined.g.vcf.gz"), path("HCM_combined.g.vcf.gz.tbi"), emit:combine_vcf
+
+    script:
+    """
+    gatk CombineGVCFs \
+        -R ${ref_genome} \
+        ${vcf_list.collect{ "-V ${it}" }.join(" ")} \
+        -O HCM_combined.g.vcf.gz
+    """
+}
+
+
+process JOINT_GENOTYPING {
+    conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
+    publishDir "${params.outdir}", mode: 'copy'
+
+    input:
+        tuple path(vcf), path(vcf_idx)
+        path ref_genome
+
+    output:
         tuple path("HCM.raw_variants.vcf.gz"), path("HCM.raw_variants.vcf.gz.tbi"), emit:raw_vcf
 
     script:
     """
-    gatk GenotypeGVCFs \
-        --reference ${ref_genome} \
-        ${vcf_list.collect{ "-V ${it}" }.join(" ")} \
+     gatk --java-options "-Xmx4g" GenotypeGVCFs \
+        -R ${ref_genome} \
+        -V ${vcf} \
         -O HCM.raw_variants.vcf.gz
     """
 }
 
+process ANALYSE_DATA {
+    conda "/mnt/d/BI_prj/wgs_proj/hcm/work/conda/"
+    publishDir "${params.outdir}", mode: 'copy'
+
+    input:
+        tuple path(vcf), path(vcf_idx)
+
+    output:
+        path "variant_metrics.table", emit:variant_metrics
+
+    script:
+    """
+    gatk VariantsToTable \
+        -V ${vcf} \
+        -F CHROM -F POS -F TYPE -F QD -F FS -F MQ -F SOR -F MQRankSum -F ReadPosRankSum \
+        -O variant_metrics.table
+
+    """
+}
 
 
 
@@ -486,6 +526,11 @@ workflow {
             .collect()
             .set{vcf_list}
     
-    JOINT_GENOTYPING(vcf_list,ref_ch)
+    
+    COMBINE_GVCF(vcf_list,ref_ch)
+
+    JOINT_GENOTYPING(COMBINE_GVCF.out.combine_vcf,ref_ch)
+
+    ANALYSE_DATA(JOINT_GENOTYPING.out.raw_vcf)
     
 }
