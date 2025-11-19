@@ -1,7 +1,9 @@
 # DATASET
 
 Accession: NCBI BioProject PRJNA675090
+
 Organism: Homo sapiens
+
 Study Type: Whole Exome Sequencing (WES)
 
 **Samples:**
