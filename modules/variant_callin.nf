@@ -115,27 +115,24 @@ process BWA_ALIGN {
 process MARK_DUPLICATE{
     tag "$sample_id"
     publishDir "${params.outdir}/results/dedup", mode: 'copy'
-    label 'mid_process'
+    label 'high_process'
 
     input:
         tuple val(sample_id), path(bam), path(bai)
 
     output:
-        tuple val(sample_id), path("${sample_id}_marked_duplicates.bam"), path("${sample_id}_marked_duplicates.bam.bai"), emit: marked_reads
+        tuple val(sample_id), path("${sample_id}_marked_duplicates.bam"), path("${sample_id}_marked_duplicates.bai"), emit: marked_reads
         path "${sample_id}_duplicate_metrics.txt", emit: metrics  
 
     script:  
     """
     picard MarkDuplicates \
-    -I ${bam} \
-    -O ${sample_id}_marked_duplicates.bam \
-    -M ${sample_id}_duplicate_metrics.txt \
-    --CREATE_INDEX true \
-    --VALIDATION_STRINGENCY LENIENT
+        I=${bam} \
+        O=${sample_id}_marked_duplicates.bam \
+        M=${sample_id}_duplicate_metrics.txt \
+        CREATE_INDEX=true \
+        VALIDATION_STRINGENCY=LENIENT
     
-    echo "=== Duplicate Metrics ==="
-
-    head -8 ${sample_id}_duplicate_metrics.txt | tail -2
     """
 }
 
@@ -236,14 +233,14 @@ process COMBINE_GVCF {
         path ref_genome
 
     output:
-        tuple path("HCM_combined.g.vcf.gz"), path("HCM_combined.g.vcf.gz.tbi"), emit:combine_vcf
+        tuple path("cohort.g.vcf.gz"), path("cohort.g.vcf.gz.tbi"), emit:combine_vcf
 
     script:
     """
     gatk CombineGVCFs \
         -R ${ref_genome} \
         ${vcf_list.collect{ "-V ${it}" }.join(" ")} \
-        -O HCM_combined.g.vcf.gz
+        -O cohort.g.vcf.gz
     """
 }
 
@@ -257,14 +254,14 @@ process JOINT_GENOTYPING {
         path ref_genome
 
     output:
-        tuple path("HCM.raw_variants.vcf.gz"), path("HCM.raw_variants.vcf.gz.tbi"), emit:raw_vcf
+        tuple path("cohort.raw_variants.vcf.gz"), path("cohort.raw_variants.vcf.gz.tbi"), emit:raw_vcf
 
     script:
     """
      gatk --java-options "-Xmx4g" GenotypeGVCFs \
         -R ${ref_genome} \
         -V ${vcf} \
-        -O HCM.raw_variants.vcf.gz
+        -O cohort.raw_variants.vcf.gz
     """
 }
 
@@ -276,14 +273,14 @@ process ANALYSE_DATA {
         tuple path(vcf), path(vcf_idx)
 
     output:
-        path "variant_metrics.table", emit:variant_metrics
+        path "cohort.variant_metrics.table", emit:variant_metrics
 
     script:
     """
     gatk VariantsToTable \
         -V ${vcf} \
         -F CHROM -F POS -F TYPE -F QD -F FS -F MQ -F SOR -F MQRankSum -F ReadPosRankSum \
-        -O variant_metrics.table
+        -O cohort.variant_metrics.table
 
     """
 }

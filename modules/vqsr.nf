@@ -29,3 +29,20 @@ process SNP_RECALILB {
         --rscript-file ${sample_id}.snp.plots.R`
     """
 }
+
+process SNP_RECALILB_APPLY {
+    input:
+        tuple val sample_id, path("${sample_id}.snf.recal"),path("${sample_id}.snf.tranches")
+    
+    output:
+        tuple val sample_id, path("${sample_id}.recalibrated_snps.vcf.gz")
+
+    gatk ApplyVQSR \
+    -R /reference/Homo_sapiens_assembly38.fasta \
+    -V ${vcf} \
+    --recal-file ${recal_file}\
+    --tranches-file ${tranches_file} \
+    --truth-sensitivity-filter-level 99.5 \
+    --mode SNP \
+    -O ${sample_id}.recalibrated_snps.vcf.gz
+}
