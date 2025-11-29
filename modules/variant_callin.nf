@@ -231,6 +231,7 @@ process COMBINE_GVCF {
     input:
         path vcf_list
         path ref_genome
+        path interval_list
 
     output:
         tuple path("cohort.g.vcf.gz"), path("cohort.g.vcf.gz.tbi"), emit:combine_vcf
@@ -240,7 +241,8 @@ process COMBINE_GVCF {
     gatk CombineGVCFs \
         -R ${ref_genome} \
         ${vcf_list.collect{ "-V ${it}" }.join(" ")} \
-        -O cohort.g.vcf.gz
+        -O cohort.g.vcf.gz \ 
+        -L ${interval_list}  #for WES
     """
 }
 
